@@ -1,0 +1,289 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+  <meta charset="UTF-8" />
+  <title>Turnverein Anmeldung</title>
+
+  <!-- Flatpickr – Mehrfach-Date-Picker -->
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/flatpickr/dist/flatpickr.min.css" />
+
+  <style>
+    body { font-family: sans-serif; margin: 0; padding: 0 1rem; background: #f4f4f4; }
+    h1, h2, h3, h4, h5 { margin-top: 1rem; }
+    section { margin: 1rem 0; padding: 1rem; background: #fff; border-radius: 8px; box-shadow: 0 0 4px rgba(0,0,0,.1); }
+    label { display: block; margin: .5rem 0 .25rem; }
+    input, button { padding: .4rem; border: 1px solid #ccc; border-radius: 4px; }
+    .hidden { display: none; }
+    .btn-remove { background: #e74c3c; color: #fff; border: none; border-radius: 4px; padding: .2rem .5rem; cursor: pointer; }
+    .status-btns button, .disc-btns button, .role-btns button { margin-right: .5rem; margin-top: .25rem; }
+    .status-selected, .disc-selected, .role-selected { font-weight: bold; background: #3498db; color: #fff; }
+    .reasonInp { display: block; margin-top: .5rem; }
+    #overviewList section { border-top: 1px solid #ddd; padding-top: .5rem; }
+    #overviewList ul { list-style: none; padding-left: 0; }
+    #overviewList li { padding: .25rem 0; }
+  </style>
+</head>
+<body>
+<h1>Turnverein Anmeldung</h1>
+
+<div id="auth"></div>
+<div id="app" class="hidden">
+  <h2 id="welcome"></h2>
+
+  <section id="disciplinesSection" class="hidden">
+    <h3>Meine Disziplinen</h3>
+    <div id="disciplineBtns" class="disc-btns"></div>
+    <button id="saveDiscBtn">Speichern</button>
+  </section>
+
+  <section id="leaderSection" class="hidden">
+    <h3>Trainings freigeben</h3>
+    <label>Datum wählen (Di oder Fr, Mehrfach-Auswahl möglich):</label>
+    <input id="datePicker" placeholder="Datum auswählen" />
+    <button id="releaseBtn">Termine freigeben</button>
+    <h4>Freigegebene Termine</h4>
+    <ul id="releasedList"></ul>
+  </section>
+
+  <section id="attendanceSection" class="hidden">
+    <h3>Anmeldung zu Trainings</h3>
+    <div id="attendanceList"></div>
+  </section>
+
+  <section id="overviewSection" class="hidden">
+    <h3>Leiter-Übersicht</h3>
+    <div id="overviewList"></div>
+  </section>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/flatpickr"></script>
+<script>
+/* ----------------- Konstanten & Hilfsfunktionen ----------------- */
+const disciplines = [
+  "Gymnastik Kleinfeld", "Gymnastik Bühne", "Schaukelringe",
+  "Steinheben", "Steinstossen", "Schleuderball", "Pendelstafette"
+];
+const weekdaysAllowed = [2, 5]; // Dienstag & Freitag
+
+function $(q, ctx=document){ return ctx.querySelector(q); }
+function load(key, def){ return JSON.parse(localStorage.getItem(key)) ?? def; }
+function save(key, val){ localStorage.setItem(key, JSON.stringify(val)); }
+function formatDateISO(d){ return d.toISOString().split("T")[0]; }
+function formatDateLocal(d){ return new Intl.DateTimeFormat("de-CH",{day:"numeric",month:"long",year:"numeric"}).format(d); }
+
+/* ----------------- Datenstrukturen ----------------- */
+let users      = load("users", []);               // User-Array
+let releases   = load("releases", []);            // Array von Datumstrings
+let attendance = load("attendance", {});          // Objekt {date:{userId:{status,reason}}}
+let currentUser = null;
+
+/* ----------------- Authentifizierung & Registrierung ----------------- */
+function renderAuth(){
+  const el = $("#auth");
+  if(currentUser){
+    el.innerHTML = `
+      Eingeloggt als <strong>${currentUser.first} ${currentUser.last}</strong> (${currentUser.role})
+      <button id="logoutBtn">Logout</button>
+    `;
+    $("#logoutBtn").onclick = () => { currentUser=null; sessionStorage.removeItem("uid"); render(); };
+    return;
+  }
+
+  el.innerHTML = `
+    <section>
+      <h2>Login</h2>
+      <form id="loginForm">
+        <label>Vorname</label><input required name="first" />
+        <label>Nachname</label><input required name="last" />
+        <button>Anmelden</button>
+      </form>
+    </section>
+    <section>
+      <h2>Registrieren</h2>
+      <div id="regFormDiv">
+        <label>Vorname</label><input id="regFirst" required />
+        <label>Nachname</label><input id="regLast" required />
+        <label>Rolle</label>
+        <div id="regRoleBtns" class="role-btns">
+          <button type="button" data-role="mitglied" class="role-selected">Mitglied</button>
+          <button type="button" data-role="leiter">Leiter</button>
+        </div>
+        <label>Disziplinen</label>
+        <div id="regDiscBtns" class="disc-btns"></div>
+        <button id="regSubmit">Registrieren</button>
+      </div>
+    </section>
+  `;
+
+  // Rollenwahl per Buttons
+  let regRole = 'mitglied';
+  document.querySelectorAll('#regRoleBtns button').forEach(btn=>{
+    btn.onclick = () => {
+      document.querySelectorAll('#regRoleBtns button').forEach(b=>b.classList.remove('role-selected'));
+      btn.classList.add('role-selected');
+      regRole = btn.dataset.role;
+    };
+  });
+
+  // Disziplinenwahl per Buttons
+  const regDisc = [];
+  const regDiscContainer = $('#regDiscBtns');
+  disciplines.forEach(d=>{
+    const b = document.createElement('button');
+    b.type = 'button'; b.textContent = d;
+    b.onclick = () => {
+      const i = regDisc.indexOf(d);
+      if(i>-1){ regDisc.splice(i,1); b.classList.remove('disc-selected'); }
+      else { regDisc.push(d); b.classList.add('disc-selected'); }
+    };
+    regDiscContainer.appendChild(b);
+  });
+
+  // Registrierung abschicken
+  $('#regSubmit').onclick = () => {
+    const first = $('#regFirst').value.trim();
+    const last  = $('#regLast').value.trim();
+    if(!first||!last){ alert('Bitte Vor- und Nachname eingeben'); return; }
+    if(users.some(u=>u.first===first&&u.last===last)){ alert('Benutzer existiert bereits'); return; }
+    const user = { id: Date.now().toString(36), first, last, role: regRole, disciplines: [...regDisc] };
+    users.push(user);
+    save('users',users);
+    alert('Registriert! Bitte jetzt einloggen.');
+  };
+
+  // Login-Formular
+  $('#loginForm').onsubmit = e => {
+    e.preventDefault();
+    const {first,last} = Object.fromEntries(new FormData(e.target));
+    const u = users.find(x=>x.first===first.trim()&&x.last===last.trim());
+    if(!u){ alert('Benutzer nicht gefunden'); return; }
+    currentUser = u;
+    sessionStorage.setItem('uid',u.id);
+    render();
+  };
+}
+
+/* ----------------- Benutzerbereich ----------------- */
+function renderUserSections(){
+  $('#welcome').textContent = `Willkommen, ${currentUser.first}!`;
+
+  // Disziplinen bearbeiten
+  const db = $('#disciplineBtns'); db.innerHTML = '';
+  disciplines.forEach(d=>{
+    const btn = document.createElement('button'); btn.type='button'; btn.textContent=d;
+    if(currentUser.disciplines.includes(d)) btn.classList.add('disc-selected');
+    btn.onclick = () => {
+      const idx = currentUser.disciplines.indexOf(d);
+      if(idx>-1) currentUser.disciplines.splice(idx,1);
+      else currentUser.disciplines.push(d);
+      btn.classList.toggle('disc-selected');
+    };
+    db.appendChild(btn);
+  });
+  $('#saveDiscBtn').onclick = () => {
+    users = users.map(u=>u.id===currentUser.id?currentUser:u);
+    save('users',users);
+    alert('Disziplinen gespeichert.');
+  };
+  $('#disciplinesSection').classList.remove('hidden');
+
+  // Leiterfunktionen
+  if(currentUser.role==='leiter'){
+    setupLeaderUI();
+    $('#leaderSection').classList.remove('hidden');
+    $('#overviewSection').classList.remove('hidden');
+    renderOverview();
+  } else {
+    $('#leaderSection').classList.add('hidden');
+    $('#overviewSection').classList.add('hidden');
+  }
+
+  renderAttendanceList();
+  $('#attendanceSection').classList.remove('hidden');
+}
+
+/* ---------- Kalender-Freigabe ---------- */
+function setupLeaderUI(){
+  if(!window.fp){ window.fp = flatpickr('#datePicker',{mode:'multiple',dateFormat:'d.m.Y',locale:'de',enable:[d=>weekdaysAllowed.includes(d.getDay())]}); }
+  $('#releaseBtn').onclick = () => {
+    const dates = window.fp.selectedDates;
+    if(!dates.length){ alert('Bitte Datum wählen'); return; }
+    let added=0;
+    dates.forEach(d=>{ const iso=formatDateISO(d); if(!releases.includes(iso)){ releases.push(iso); added++; }});
+    if(added){ save('releases',releases); renderReleasedList(); renderAttendanceList(); }
+    window.fp.clear();
+  };
+  renderReleasedList();
+}
+
+/* ---------- Freigegebene Termine ---------- */
+function renderReleasedList(){
+  const ul = $('#releasedList'); ul.innerHTML='';
+  releases.sort().forEach(r=>{
+    const li = document.createElement('li'); li.textContent = formatDateLocal(new Date(r))+' ';
+    const btn = document.createElement('button'); btn.textContent='Entfernen'; btn.className='btn-remove';
+    btn.onclick=()=>{ releases=releases.filter(x=>x!==r); save('releases',releases); renderReleasedList(); renderAttendanceList(); renderOverview(); };
+    li.appendChild(btn); ul.appendChild(li);
+  });
+}
+
+/* ---------- Teilnahme Buttons ---------- */
+function renderAttendanceList(){
+  const wrap = $('#attendanceList'); wrap.innerHTML='';
+  const dates=[...releases].sort(); if(!dates.length){ wrap.textContent='Noch keine Termine freigeschaltet.'; return; }
+  dates.forEach(dateISO=>{
+    const dLocal=formatDateLocal(new Date(dateISO));
+    const current = attendance[dateISO]?.[currentUser.id]||{};
+    const container = document.createElement('div'); container.style.marginBottom='1rem';
+
+    const title = document.createElement('strong'); title.textContent=dLocal; container.appendChild(title);
+
+    const btns = document.createElement('div'); btns.className='status-btns';
+    [{label:'L1',value:'L1'},{label:'L2',value:'L2'},{label:'L3',value:'L3'},{label:'ALL',value:'ALL'},{label:'Abs',value:'ABSENT'}]
+      .forEach(opt=>{
+        const b=document.createElement('button'); b.type='button'; b.textContent=opt.label;
+        if(opt.value===current.status) b.classList.add('status-selected');
+        b.onclick=()=>handleStatusClick(dateISO,opt.value,container);
+        btns.appendChild(b);
+      });
+    container.appendChild(btns);
+
+    const ri=document.createElement('input'); ri.type='text'; ri.className='reasonInp';
+    ri.placeholder='Grund (Pflicht bei Abmeldung)'; ri.style.width='100%';
+    ri.value=current.reason||''; ri.disabled=current.status!=='ABSENT'; container.appendChild(ri);
+
+    wrap.appendChild(container);
+  });
+}
+function handleStatusClick(dateISO,status,container){
+  const ri=container.querySelector('.reasonInp');
+  if(status==='ABSENT'){
+    ri.disabled=false; ri.focus();
+    ri.onblur=()=>{ const reason=ri.value.trim(); if(!reason){ alert('Bitte Grund eingeben'); ri.focus(); return; } saveStatus(dateISO,status,reason); };
+  } else { ri.disabled=true; saveStatus(dateISO,status,''); }
+}
+function saveStatus(dateISO,status,reason){ if(!attendance[dateISO]) attendance[dateISO]={}; attendance[dateISO][currentUser.id]={status,reason}; save('attendance',attendance); renderAttendanceList(); renderOverview(); }
+
+/* ---------- Übersicht nach Datum ---------- */
+function renderOverview(){
+  if(currentUser.role!=='leiter') return;
+  const wrap=$('#overviewList'); wrap.innerHTML='';
+  releases.sort().forEach(dateISO=>{
+    const section=document.createElement('section');
+    const h4=document.createElement('h4'); h4.textContent=formatDateLocal(new Date(dateISO)); section.appendChild(h4);
+    const entry=attendance[dateISO]||{};
+    const present=users.filter(u=>entry[u.id]&&entry[u.id].status!=='ABSENT');
+    const absent = users.filter(u=>entry[u.id]&&entry[u.id].status==='ABSENT');
+    if(present.length){ const h5p=document.createElement('h5'); h5p.textContent='Anwesend'; section.appendChild(h5p); const ulp=document.createElement('ul'); present.forEach(u=>{ const li=document.createElement('li'); li.textContent=`${u.first} ${u.last}: ${entry[u.id].status}`; ulp.appendChild(li); }); section.appendChild(ulp); }
+    if(absent.length){ const h5a=document.createElement('h5'); h5a.textContent='Abwesend'; section.appendChild(h5a); const ula=document.createElement('ul'); absent.forEach(u=>{ const li=document.createElement('li'); li.textContent=`${u.first} ${u.last}: ${entry[u.id].reason}`; ula.appendChild(li); }); section.appendChild(ula); }
+    wrap.appendChild(section);
+  });
+}
+
+/* ----------------- Haupt-Renderer & Init ----------------- */
+function render(){ renderAuth(); if(currentUser){ $('#app').classList.remove('hidden'); renderUserSections(); } else { $('#app').classList.add('hidden'); } }
+const uid=sessionStorage.getItem('uid'); if(uid) currentUser=users.find(u=>u.id===uid)||null;
+document.addEventListener('DOMContentLoaded', render);
+</script>
+</body>
+</html>
